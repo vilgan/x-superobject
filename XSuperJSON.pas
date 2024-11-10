@@ -646,7 +646,7 @@ var
                end;
         #34{"}: Result := Result + '\"';
         #92{\}: Result := Result + '\\';
-        //#127..#65535: Result := Result + ChrtoUTF16(Ord(Tmp^));
+        #127..#65535: Result := Result + ChrtoUTF16(Ord(Tmp^));
       else
         Result := Result + Tmp^;
       end;
@@ -848,8 +848,6 @@ begin
        JSON.Free;
   end;
 end;
-
-{ TTrigger }
 
 { TTrigger }
 
@@ -1190,7 +1188,8 @@ procedure TLexGenerator.CreateLexeme;
 begin
   KillLex;
   New(FLexem);
-  FillChar(FLexem.Pos, SizeOf(TPosition), 0);
+  FLexem.Pos:=Default(TPosition);
+  //FillChar(FLexem.Pos, SizeOf(TPosition), 0);
   FLexem.LType := ltNull;
 end;
 
@@ -1889,7 +1888,8 @@ begin
   repeat
     Item := ReadValue(Base);
     if Assigned(Item) then
-       TJSONArray(Result).Add(Item);
+       Result.Add(Item);
+//       TJSONArray(Result).Add(Item);
   until not LGen.CheckKill(ltVirgule);
 
   if not LGen.CheckKill(ltCRight) then
@@ -1981,7 +1981,8 @@ begin
            ltCLeft:
               begin
                  if Result is TJSONArray then
-                    Result := ReadArrayIndex(TJSONArray(Result))
+                    Result := ReadArrayIndex(IJSONArray(Result))
+//                    Result := ReadArrayIndex(TJSONArray(Result))
                  else
                     CreateExcept(Err_Expected, ['Array']);
               end;
@@ -2003,7 +2004,8 @@ begin
        LGen.KillLex;
        if not LGen.CheckKill(ltColon) then
           CreateExcept(Err_Expected, [':']);
-       TJSONObject(Result).AddPair(TJSONPair.Create(Name, ReadValue(Base)));
+       Result.AddPair(TJSONPair.Create(Name, ReadValue(Base)));
+//       TJSONObject(Result).AddPair(TJSONPair.Create(Name, ReadValue(Base)));
     end
   until not LGen.CheckKill(ltVirgule);
 
@@ -2166,7 +2168,8 @@ constructor TISO8601.Create(const Value: String);
 var
   Matches: TMatchCollection;
 begin
-  FillChar(Self, SizeOf(TISO8601), #0);
+  Self:=Default(TISO8601);
+  //FillChar(Self, SizeOf(TISO8601), #0);
   Matches := TRegEx.Matches(Value,  '(?=\d{4})((\d{4})-(\d{2})-(\d{2}))?(T(\d{2})\:(\d{2})\:('+
                                     '\d{2})(Z)?(\.(\d{1,3})(Z)?)?([+-](\d{2})\:(\d{2}))?)?|(\d{2})\:('+
                                     '\d{2})\:(\d{2})(Z)?(\.(\d{1,3}))?([+-](\d{2})\:(\d{2}))?');
@@ -2323,7 +2326,7 @@ begin
      Str.AppendVal( cNull )
   else
   begin
-     if Str.UniversalTime then
+     if Str.UniversalTime and ((PDateTime(@FData)^)>0) then
         Str.AppendVal( '"' +  FormatDateTime(FFormat, TTimeZone.Local.ToUniversalTime(PDateTime(@FData)^)) + 'Z"' )
      else
         Str.AppendVal( '"' +  FormatDateTime(FFormat, PDateTime(@FData)^) + '"' );

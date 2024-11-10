@@ -48,6 +48,7 @@ uses
   ,IdGlobal
   ,IdCoderMIME
   {$ENDIF}
+  ,SyncObjs
   ;
 
 {$IFDEF XE2UP}
@@ -503,7 +504,7 @@ type
 
   TGenericsInfo = class
   private
-    FContext: TRttiContext;
+    //FContext: TRttiContext;
     FType: TRttiType;
     FAddMethod: TRttiMethod;
     FCountProperty: TRttiProperty;
@@ -636,6 +637,12 @@ type
   function SA(JSON: String = '[]'): ISuperArray; overload;
   function SA(const Args: array of const): ISuperArray; overload;
 
+
+var
+  Ctx: TRTTIContext;
+  RTTICS: TCriticalSection;
+  JSONFS: TFormatSettings;
+
 implementation
 
 var GenericsUnit : String;
@@ -734,7 +741,7 @@ begin
   if JVal.QueryInterface(GetTypeData(TypeInfo(T)).Guid, FJSONObj) = S_OK then
      FInterface := TValue.From<T>(FJSONObj).AsInterface
   else
-     FCasted := JVal
+     FCasted := JVal;
 end;
 
 function TBaseJSON<T, Typ>.GetValue<C>(const Name: Typ): C;
@@ -744,7 +751,21 @@ begin
        if JsonValue is TJSONNull then
           Result := Nil
        else
-          Result := JSonValue as C
+         if (JSonValue is TJSONString) and (TypeInfo(C)=TypeInfo(TJSONInteger)) and
+           (StrToIntDef((JSonValue as TJSONString).Value, 1)=StrToIntDef((JSonValue as TJSONString).Value, -1)) then
+           Result := TJSONInteger.Create((JSONValue as TJSONString).Value.ToInteger) as C
+         else
+           if (JSonValue is TJSONString) and (TypeInfo(C)=TypeInfo(TJSONFloat)) and
+             (StrToFloatDef((JSonValue as TJSONString).Value, 1, JSONFS)=StrToFloatDef((JSonValue as TJSONString).Value, -1, JSONFS)) then
+             Result := TJSONFloat.Create(StrToFloat((JSONValue as TJSONString).Value, JSONFS)) as C
+           else
+             if (JSonValue is TJSONString) and (TypeInfo(C)=TypeInfo(TJSONBoolean)) and
+               (((JSONValue as TJSONString).Value='0') or ((JSONValue as TJSONString).Value='1')) then
+               Result := TJSONBoolean.Create((JSONValue as TJSONString).Value='1') as C
+             else
+               if (JSonValue is TJSONInteger) and (TypeInfo(C)=TypeInfo(TJSONBoolean)) then
+                 Result := TJSONBoolean.Create((JSONValue as TJSONInteger).Value<>0) as C
+               else Result := JSonValue as C
   else
   if Self.InheritsFrom(TSuperArray) then
     Result := TJSONArray(FInterface).Get(PInteger(@Name)^) as C
@@ -803,8 +824,8 @@ function TBaseJSON<T, Typ>.AsJSON(const Ident, UniversalTime: Boolean): String;
 var
   SBuild: TJSONWriter;
 begin
+  SBuild := TJSONWriter.Create(Ident, UniversalTime);
   try
-    SBuild := TJSONWriter.Create(Ident, UniversalTime);
     if Assigned(FCasted) then
        FCasted.AsJSONString(SBuild)
     else
@@ -813,7 +834,6 @@ begin
   finally
     SBuild.Free;
   end;
-
 end;
 
 function TBaseJSON<T, Typ>.Contains(Key: Typ): Boolean;
@@ -850,7 +870,7 @@ end;
 
 function TBaseJSON<T, Typ>.DefaultValueClass<TT>(const Value): TT;
 var
-  r: TRttiContext;
+  //r: TRttiContext;
   ty: TRttiType;
 begin
   if TJSONString.InheritsFrom(TT) then
@@ -885,18 +905,24 @@ begin
   end
   else
   begin
-    r := TRttiContext.Create;
-    ty := r.GetType(TClass(TT));
-    if ty = nil then
-      exit(Nil);
+    //r := TRttiContext.Create;
+    //ty := r.GetType(TClass(TT));
+    RTTICS.Enter;
     try
-      Result := TT(ty.GetMethod('Create').Invoke(ty.AsInstance.MetaclassType, []).AsObject);
-    except
-      if Assigned(ty) then
-        ty.Free;
-      raise;
+      ty := Ctx.GetType(TClass(TT));
+      if ty = nil then
+        exit(Nil);
+      try
+        Result := TT(ty.GetMethod('Create').Invoke(ty.AsInstance.MetaclassType, []).AsObject);
+      except
+        if Assigned(ty) then
+          ty.Free;
+        raise;
+      end;
+    finally
+      RTTICS.Leave;
     end;
-    r.Free;
+    //r.Free;
   end;
 end;
 
@@ -1486,10 +1512,11 @@ end;
 
 function TSuperArray.AsType<T>: T;
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiType;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(TypeInfo(T));
     if not Assigned(Typ) then
@@ -1506,9 +1533,9 @@ begin
        end;
     end;
     raise SOException.Create('Unsupported type.');
-  except
-    Ctx.Free;
-    raise;
+  finally
+    //Ctx.Free;
+    RTTICS.Leave;
   end;
 end;
 
@@ -1681,11 +1708,12 @@ end;
 
 constructor TSuperObjectHelper.FromJSON(const JSON: ISuperObject; CreateArgs: array of TValue; const ConstructMethod: String);
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiType;
   Method: TRttiMethod;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(ClassType);
     if not Assigned(Typ) then Exit;
@@ -1693,7 +1721,8 @@ begin
     if (not Assigned(Method)) or not Method.IsConstructor then Exit;
     Method.Invoke(Self, CreateArgs);
   finally
-    Ctx.Free;
+    //Ctx.Free;
+    RTTICS.Leave;
     TSerializeParse.WriteObject(Self, JSON);
   end;
 end;
@@ -1765,31 +1794,35 @@ end;
 
 class procedure TSerializeParse.ReadObject(AObject: TObject; IResult: ISuperObject);
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiType;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(AObject.ClassType);
     if not Assigned(Typ) then Exit;
     ReadMembers(AObject, Typ, IResult) ;
   finally
-    Ctx.Free;
+    RTTICS.Leave;
+    //Ctx.Free;
   end;
 end;
 
 class procedure TSerializeParse.ReadRecord(Info: PTypeInfo; ARecord: Pointer; IResult: ISuperObject);
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiRecordType;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(Info).AsRecord;
     if not Assigned(Typ) then Exit;
     ReadMembers(ARecord, Typ, IResult) ;
   finally
-    Ctx.Free;
+    RTTICS.Leave;
+    //Ctx.Free;
   end;
 end;
 
@@ -2005,12 +2038,18 @@ end;
 
 class function TSerializeParse.IsCollection(Cls: TClass): Boolean;
 begin
-  with TRttiContext.Create do
+  RTTICS.Enter;
+  try
+    Result:=IsCollection(Ctx.GetType(Cls));
+  finally
+    RTTICS.Leave;
+  end;
+  {with TRttiContext.Create do
     try
       Result := IsCollection(GetType(Cls));
     finally
       Free;
-    end;
+    end;}
 end;
 
 class function TSerializeParse.IsDisabled(const Attributes: TArray<TCustomAttribute>): Boolean;
@@ -2031,7 +2070,7 @@ end;
 class function TSerializeParse.IsGenerics(Cls: TClass): Boolean;
 var
   Info: TGenericsInfo;
-  ctx: TRttiContext;
+  //ctx: TRttiContext;
   typ: TRttiType;
 begin
   if FGenericsCache.TryGetValue(Cls, Info) then
@@ -2039,13 +2078,15 @@ begin
   else
   begin
      Result := False;
-     ctx := TRttiContext.Create;
+     RTTICS.Enter;
+     //ctx := TRttiContext.Create;
      try
         typ := ctx.GetType(Cls);
         if typ <> Nil then
            Result := IsGenerics(typ)
      finally
-       ctx.Free;
+       RTTICS.Leave;
+       //ctx.Free;
      end;
   end;
 end;
@@ -2082,7 +2123,7 @@ end;
 class function TSerializeParse.ObjectConstructor(
   Instance: TClass): TObject;
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiType;
   Mtd: TRttiMethod;
   function InEncoding(List: TArray<TRttiParameter>): Boolean;
@@ -2096,7 +2137,8 @@ var
      Result := False;
   end;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(Instance);
     Mtd := nil;
@@ -2113,19 +2155,21 @@ begin
 
     Result := Mtd.Invoke(Instance, GetGenericsCreateArgs(Typ)).AsObject;
   finally
-    Ctx.Free;
+    RTTICS.Leave;
+    //Ctx.Free;
   end;
 end;
 
 class function TSerializeParse.ObjectConstructorParamCount(
   Instance: TClass): Integer;
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiType;
   Mtd: TRttiMethod;
 begin
   Result := -1;
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(Instance);
     if IsGenerics(Typ) then
@@ -2135,7 +2179,8 @@ begin
     if not Assigned(Mtd) then Exit;
     Result := Length( Mtd.GetParameters );
   finally
-    Ctx.Free;
+    RTTICS.Leave;
+    //Ctx.Free;
   end;
 end;
 
@@ -2371,12 +2416,18 @@ var
   Item: TCollectionItem;
   JMembers: IMember;
 begin
-  with TRttiContext.Create do
+  RTTICS.Enter;
+  try
+    ItemType:=Ctx.GetType(ACollection.ItemClass);
+  finally
+    RTTICS.Leave;
+  end;
+  {with TRttiContext.Create do
       try
         ItemType := GetType(ACollection.ItemClass)
       finally
         Free;
-      end;
+      end;}
 
   if ItemType = Nil then
      raise ESerializeError.CreateFmt('Unknown collection item type (%s).', [ACollection.ItemClass.ClassName]);
@@ -2423,15 +2474,36 @@ var
   DataType: TDataType;
   Obj: TObject;
   Ancestor: IJSONAncestor;
+  DT: TDateTime;
+  Ok: boolean;
 begin
   if not IJsonData.Contains(Member) then
-     Exit;
+    begin
+      if (IJSONData.DataType=dtArray) and (RType.Kind=tkDynArray) then
+        begin
+          J:=0;
+          DynArraySetLength(PPointer(Data)^, RType, 1, @J);
+        end;
+      Exit;
+    end;
 
   if (RType = TypeInfo(TDateTime)) or (RType = TypeInfo(TDate)) or (RType = TypeInfo(TTime)) then
   begin
     Ancestor := IJSONData.Ancestor[Member];
-    if not (Ancestor.DataType in [dtNull, dtString]) then
-       SetValue<Typ>(Data, MemberValue, Member, TValue.From<TDateTime>(Ancestor.AsVariant))
+    if Ancestor.DataType=dtString then
+      begin
+        Ok:=TryStrToDateTime(VarToStr(Ancestor.AsVariant), DT, JSONFS);
+        if not Ok then
+          Ok:=TryStrToDate(VarToStr(Ancestor.AsVariant), DT, JSONFS);
+        if not Ok then
+          Ok:=TryStrToTime(VarToStr(Ancestor.AsVariant), DT, JSONFS);
+        if Ok then
+          SetValue<Typ>(Data, MemberValue, Member, DT)
+        else SetValue<Typ>(Data, MemberValue, Member, 0);
+      end
+    else
+      if not (Ancestor.DataType in [dtNull, dtString]) then
+        SetValue<Typ>(Data, MemberValue, Member, TValue.From<TDateTime>(Ancestor.AsVariant));
   end
   else
   case RType.Kind of
@@ -2609,33 +2681,37 @@ end;
 class procedure TSerializeParse.WriteObject(AObject: TObject;
   IData: ISuperObject);
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiType;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(AObject.ClassType);
     if (not Assigned(Typ)) or (IData.DataType = dtNil) then Exit;
     WriteMembers(AObject, Typ, IData);
   finally
-    Ctx.Free;
+    RTTICS.Leave;
+    //Ctx.Free;
   end;
 end;
 
 class procedure TSerializeParse.WriteRecord(Info: PTypeInfo; ARecord: Pointer;
   IData: ISuperObject);
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiType;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(Info);
     if (not Assigned(Typ)) or (IData.DataType = dtNil) then
       Exit;
     WriteMembers(ARecord, Typ, IData);
   finally
-    Ctx.Free;
+    RTTICS.Leave;
+    //Ctx.Free;
   end;
 end;
 
@@ -2717,7 +2793,8 @@ var
   Val: TValue;
   P: Pointer;
 begin
-  FillChar(Result, SizeOf(T), 0);
+  Result:=Default(T);
+  //FillChar(Result, SizeOf(T), 0);
   Val := TValue.From<T>(Result);
   P := IValueData(TValueData(Val).FValueData).GetReferenceToRawData;
   TSerializeParse.WriteRecord(Val.TypeInfo, P, JSON);
@@ -2752,7 +2829,13 @@ begin
   else
   if pV = TypeInfo(Boolean) then begin
      if Valuable then
-        Result := (Self as TJSONBoolean).Value
+       if (Self is TJSONString) and (((Self as TJSONString).Value='0') or ((Self as TJSONString).Value='1')) then
+          Result := (Self as TJSONString).Value='1'
+       else
+         if (Self is TJSONInteger) then
+           Result := (Self as TJSONInteger).Value<>0
+         else
+           Result := (Self as TJSONBoolean).Value
      else
         Result := False
   end
@@ -3069,18 +3152,24 @@ begin
   Typ := AType;
   if GenericClass <> Nil then
   begin
-     FContext := TRttiContext.Create;
-     FType := FContext.GetType(GenericClass);
-     FAddMethod := FType.GetMethod('Add');
-     FCountProperty := FType.GetProperty('Count');
-     FGetItemMethod := FType.GetIndexedProperty('Items');
+     //FContext := TRttiContext.Create;
+     //FType := FContext.GetType(GenericClass);
+     RTTICS.Enter;
+     try
+       FType := Ctx.GetType(GenericClass);
+       FAddMethod := FType.GetMethod('Add');
+       FCountProperty := FType.GetProperty('Count');
+       FGetItemMethod := FType.GetIndexedProperty('Items');
+     finally
+       RTTICS.Leave;
+     end;
   end
 end;
 
 destructor TGenericsInfo.Destroy;
 begin
-  if IsGeneric then
-     FContext.Free;
+{  if IsGeneric then
+     FContext.Free;}
   inherited;
 end;
 
@@ -3187,13 +3276,14 @@ end;
 
 class function TJSON.SuperObject(Value: TValue): ISuperObject;
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiType;
   I: Integer;
   SubVal: TValue;
   _Array: ISuperArray;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(Value.TypeInfo);
     if not Assigned(Typ) then Exit(SO);
@@ -3256,16 +3346,16 @@ begin
        end;
 
     end;
-  except
-    Ctx.Free;
-    raise;
+  finally
+    //Ctx.Free;
+    RTTICS.Leave;
   end;
 end;
 
 
 class function TJSON.Parse<T>(JSON: ISuperObject): T;
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   Typ: TRttiType;
   DType: TDataType;
   _Array: ISuperArray;
@@ -3273,7 +3363,8 @@ var
   I: Integer;
 type PTime = ^TTime;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(TypeInfo(T));
     if not Assigned(Typ) then
@@ -3332,20 +3423,21 @@ begin
        end;
 
     end;
-  except
-    Ctx.Free;
-    raise;
+  finally
+    //Ctx.Free;
+    RTTICS.Leave;
   end;
 end;
 
 
 class function TJSON.Parse<T>(JSON: ISuperArray): T;
 var
-  Ctx: TRttiContext;
+  //Ctx: TRttiContext;
   _PResult: Pointer;
   Typ: TRttiType;
 begin
-  Ctx := TRttiContext.Create;
+  //Ctx := TRttiContext.Create;
+  RTTICS.Enter;
   try
     Typ := Ctx.GetType(TypeInfo(T));
     if not Assigned(Typ) then Exit(Default(T));
@@ -3356,9 +3448,10 @@ begin
                         Typ.Handle,
                         Typ,
                         JSON);
-   finally
-     Ctx.Free;
-   end;
+  finally
+    RTTICS.Leave;
+    //Ctx.Free;
+  end;
 end;
 
 class function TJSON.Stringify(Value: TValue; Indent, UniversalTime: Boolean): String;
@@ -3455,5 +3548,19 @@ end;
 initialization
 
   GenericsUnit := TEnumerable<Boolean>.UnitName;
+  RTTICS:=TCriticalSection.Create;
+  Ctx:=TRTTIContext.Create;
+  Ctx.FindType('');
+  JSONFS:=TFormatSettings.Create;
+  JSONFS.DecimalSeparator:='.';
+  JSONFS.DateSeparator:='-';
+  JSONFS.TimeSeparator:=':';
+  JSONFS.ShortDateFormat:='yyyy-MM-dd';
+  JSONFS.LongTimeFormat:='hh:mm:ss.zzz';
+  JSONFS.ShortTimeFormat:='hh:mm.ss';
+
+finalization
+  Ctx.Free;
+  RTTICS.Free;
 
 end.
